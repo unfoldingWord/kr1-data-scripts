@@ -375,6 +375,20 @@ def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_F
             max_len = max((len(str(cell.value)) for cell in col_cells if cell.value), default=10)
             worksheet.column_dimensions[col_letter].width = max_len + 2
 
+        # Step 9: Add "Last Generated" footer note at A153:B153
+        from datetime import datetime
+
+        footer_row = 153
+        worksheet.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=2)
+
+        for col in range(1, 3):  # Apply style to both A and B
+            footer_cell = worksheet.cell(row=footer_row, column=col)
+            footer_cell.fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+            footer_cell.border = thin_border
+            footer_cell.alignment = Alignment(horizontal="left", vertical="center")
+            if col == 1:
+                footer_cell.value = f"Last Generated: {datetime.today().strftime('%m/%d/%Y')}"
+
     print(f"Excel file saved at {file_path}")
 
 
