@@ -39,11 +39,12 @@ GET_STRATEGIC_RESOURCES_QUERY = """
     ORDER BY resource_level desc, `language` asc;
 """
 
-GET_STRATEGIC_RESOURCE_TYPES_QUERY = """
-    select r.resource_name as resource_code, srt.resource_type 
-    from resources r 
-    inner join resource_type_mapping rtm on r.resource_id = rtm.resource_id 
-    inner join sli_resource_type srt on srt.resource_type_id = rtm.resource_type_id 
+GET_LANGUAGE_ENGAGEMENT_ISO_CODES = """
+    select distinct sli.iso_629_2
+    from language_engagements le 
+    join uw_translation_products utp on utp.language_engagement_id = le.language_engagement_id
+    join ietf_languages_codes ietf on ietf.ietf_id = le.ietf_id
+    join sli_language_data sli on sli.iso_629_2 = ietf.iso_639_2
 """
 
 dcs_aquifer_code_map = {
@@ -213,6 +214,17 @@ def fetch_slr_data():
         connection.close()
 
 
+def get_language_engagement_iso_codes():
+    connection = mysql.connector.connect(**db_config)
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(GET_LANGUAGE_ENGAGEMENT_ISO_CODES)
+        results = cursor.fetchall()
+        return set(row["iso_629_2"] for row in results if row["iso_629_2"])
+    finally:
+        connection.close()
+
+
 def fetch_dcs_data():
     url = "https://git.door43.org/api/v1/repos/search?topic=tc-ready"
     response = requests.get(url)
@@ -258,9 +270,11 @@ def calculate_status_from_resources(resources_df):
 
 
 def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_FILE_PATH):
-    """Export to Excel with full formatting: merged headers, color-coded subheaders, wrap text, etc."""
+    """Export to Excel with full formatting: merged headers, resource shading, wrap text, etc."""
 
-    # Step 1: Expand headers as (resource_type, source)
+    strategic_iso_set = get_language_engagement_iso_codes()
+
+    # Step 1: Expand headers
     expanded_headers = []
     for resource_type in headers:
         expanded_headers.append((resource_type, "Aquifer"))
@@ -271,7 +285,10 @@ def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_F
     for _, row in sl_resource_data.iterrows():
         language_code_2 = row["language_code_2"]
         language_code_3 = row["language_code_3"]
-        new_row = list(row.values)
+        lang_name = row["Strategic Language"]
+        if language_code_3 in strategic_iso_set:
+            lang_name = f"{lang_name}**"
+        new_row = [lang_name, language_code_2, language_code_3, row["Resource Level"]]
 
         for resource_type, source in expanded_headers:
             source_key = source.lower()
@@ -283,111 +300,96 @@ def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_F
             ]
 
             final_status = calculate_status_from_resources(matching_resources)
-            resource_lines = [f"---{res_row['resource_code']}"
-                              for _, res_row in matching_resources.iterrows()]
+            resource_lines = [f"---{res_row['resource_code']}" for _, res_row in matching_resources.iterrows()]
             cell_text = final_status + "\n" + "\n".join(sorted(resource_lines)) if resource_lines else final_status
             new_row.append(cell_text)
 
         expanded_rows.append(new_row)
 
     # Step 3: Create DataFrame
-    core_columns = ["Strategic Language", "language_code_2", "language_code_3", "resource_level"]
+    core_columns = ["Strategic Language", "language_code_2", "language_code_3", "Resource Level"]
     all_columns = core_columns + expanded_headers
     expanded_df = pd.DataFrame(expanded_rows, columns=all_columns)
-    expanded_df.rename(columns={"resource_level": "Resource Level"}, inplace=True)
+    iso_629_2_by_row = expanded_df["language_code_3"].tolist()
     expanded_df.drop(columns=["language_code_2", "language_code_3"], inplace=True)
 
     # Step 4: Write to Excel
     with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        expanded_df.to_excel(writer, sheet_name="Strategic Resources", index=False, header=False, startrow=2)
-        worksheet = writer.sheets["Strategic Resources"]
+        expanded_df.to_excel(writer, sheet_name="Delta Report", index=False, header=False, startrow=2)
+        worksheet = writer.sheets["Delta Report"]
 
-        # Define styles
-        top_header_fill = PatternFill(start_color="BFBFBF", end_color="BFBFBF", fill_type="solid")   # Dark grey
-        aquifer_fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")      # Light blue
-        dcs_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")  # Very light grey
-        left_header_fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")  # Light green
+        # Styles
+        top_header_fill = PatternFill(start_color="BFBFBF", end_color="BFBFBF", fill_type="solid")
+        aquifer_fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
+        dcs_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        left_header_fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
         wrap_alignment = Alignment(wrap_text=True, vertical="top")
         bold_font = Font(bold=True)
-
-        # Step 5: Define border style
         thin_border = Border(
-            left=Side(border_style="thin", color="000000"),
-            right=Side(border_style="thin", color="000000"),
-            top=Side(border_style="thin", color="000000"),
-            bottom=Side(border_style="thin", color="000000"),
+            left=Side(style="thin", color="000000"),
+            right=Side(style="thin", color="000000"),
+            top=Side(style="thin", color="000000"),
+            bottom=Side(style="thin", color="000000"),
         )
 
-        # Step 6: Write headers
+        # Step 5: Headers
         already_merged = set()
         for col_idx, col in enumerate(expanded_df.columns, start=1):
             if isinstance(col, tuple):
                 resource_type, source = col
-
-                # Subheader (row 2)
                 subheader_cell = worksheet.cell(row=2, column=col_idx, value=source)
+                subheader_cell.font = bold_font
                 subheader_cell.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center")
-                subheader_cell.font = bold_font  # Bold "Aquifer" / "DCS"
                 subheader_cell.border = thin_border
                 subheader_cell.fill = aquifer_fill if source == "Aquifer" else dcs_fill
 
-                # Top-level header (row 1)
                 if resource_type not in already_merged:
                     header_cell = worksheet.cell(row=1, column=col_idx, value=resource_type)
-                    header_cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
                     header_cell.font = bold_font
-                    header_cell.fill = top_header_fill
+                    header_cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
                     header_cell.border = thin_border
+                    header_cell.fill = top_header_fill
                     worksheet.merge_cells(start_row=1, start_column=col_idx, end_row=1, end_column=col_idx + 1)
                     already_merged.add(resource_type)
-
             else:
-                # Static columns like "Strategic Language", "Resource Level"
                 header_cell = worksheet.cell(row=1, column=col_idx, value=col)
-                vertical_top = Alignment(horizontal="center", vertical="top", wrap_text=True)
-                header_cell.alignment = vertical_top if col in ["Strategic Language", "Resource Level"] else wrap_alignment
                 header_cell.font = bold_font
-                header_cell.fill = top_header_fill
+                header_cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
                 header_cell.border = thin_border
+                header_cell.fill = top_header_fill
                 worksheet.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
 
-        # Step 7: Borders, wrapping, Strategic Language coloring
-        thin_border = Border(
-            left=Side(border_style="thin", color="000000"),
-            right=Side(border_style="thin", color="000000"),
-            top=Side(border_style="thin", color="000000"),
-            bottom=Side(border_style="thin", color="000000"),
-        )
-
+        # Step 6: Style data rows
         for row_idx, row in enumerate(worksheet.iter_rows(min_row=3), start=3):
             for col_idx, cell in enumerate(row, start=1):
                 cell.border = thin_border
                 cell.alignment = wrap_alignment
-
-                # Shade Strategic Language column
                 if col_idx == 1:
                     cell.fill = left_header_fill
                     cell.font = bold_font
 
-        # Step 8: Auto column width
+        # Step 7: Auto column widths
         for col_cells in worksheet.columns:
             col_letter = get_column_letter(col_cells[0].column)
             max_len = max((len(str(cell.value)) for cell in col_cells if cell.value), default=10)
             worksheet.column_dimensions[col_letter].width = max_len + 2
 
-        # Step 9: Add "Last Generated" footer note at A153:B153
+        # Step 8: Footer rows
         from datetime import datetime
+        last_data_row = len(expanded_df) + 3  # header is 2 rows; data starts on row 3
+        footer_note_row = last_data_row + 1
+        legend_row = last_data_row + 2
 
-        footer_row = 153
-        worksheet.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=2)
-
-        for col in range(1, 3):  # Apply style to both A and B
-            footer_cell = worksheet.cell(row=footer_row, column=col)
-            footer_cell.fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-            footer_cell.border = thin_border
-            footer_cell.alignment = Alignment(horizontal="left", vertical="center")
-            if col == 1:
-                footer_cell.value = f"Last Generated: {datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')}"
+        for row_num, text in [(footer_note_row, f"Last Generated: {datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')}"),
+                              (legend_row, "** == uW engagements exist in this language.")]:
+            worksheet.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=2)
+            for col in range(1, 3):
+                footer_cell = worksheet.cell(row=row_num, column=col)
+                footer_cell.fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+                footer_cell.border = thin_border
+                footer_cell.alignment = Alignment(horizontal="left", vertical="center")
+                if col == 1:
+                    footer_cell.value = text
 
     print(f"Excel file saved at {file_path}")
 
