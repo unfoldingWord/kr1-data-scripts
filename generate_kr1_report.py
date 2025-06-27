@@ -387,7 +387,7 @@ def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_F
             footer_cell.border = thin_border
             footer_cell.alignment = Alignment(horizontal="left", vertical="center")
             if col == 1:
-                footer_cell.value = f"Last Generated: {datetime.today().strftime('%m/%d/%Y')}"
+                footer_cell.value = f"Last Generated: {datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')}"
 
     print(f"Excel file saved at {file_path}")
 
