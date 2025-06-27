@@ -2,7 +2,8 @@ import os
 import requests
 import pandas as pd
 import mysql.connector
-from openpyxl.styles import PatternFill, Alignment, Border, Side
+from openpyxl.styles import PatternFill, Alignment, Border, Side, Font
+from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,32 +46,15 @@ GET_STRATEGIC_RESOURCE_TYPES_QUERY = """
     inner join sli_resource_type srt on srt.resource_type_id = rtm.resource_type_id 
 """
 
-# Define a color map for headers
-header_color_map = {
-    "Foundational BT Training Videos": ("93c47d", "d9ead3"),  # Light blue header, very light blue cells
-    "Foundational Bible Stories": ("93c47d", "d9ead3"),  # Light green header, very light green cells
-    "Bible Translation Source Text (Audio Preferred)": ("ffe599", "fff2cc"),
-    "Key Biblical Concepts Resource": ("ffe599", "fff2cc"),
-    "Exegetical Notes": ("6d9eeb", "c9daf8"),
-    "Translation Guide": ("6d9eeb", "c9daf8"),
-    "Bible Dictionary": ("6d9eeb", "c9daf8"),
-    "Comprehension Testing": ("6d9eeb", "c9daf8"),
-    "Requisite Dataset - L3": ("6d9eeb", "c9daf8"),
-    "Bible Aligned to Greek": ("cc4125", "f4cccc"),
-    "Bible Aligned to Hebrew": ("cc4125", "f4cccc"),
-    "Exegetical Commentary": ("cc4125", "f4cccc"),
-    "Bible Translation Manual": ("cc4125", "f4cccc"),
-    "Greek Semantic Lexicons": ("cc4125", "f4cccc"),
-    "Hebrew Semantic Lexicons": ("cc4125", "f4cccc"),
-    "Greek Grammars": ("cc4125", "f4cccc"),
-    "Hebrew Grammars": ("cc4125", "f4cccc"),
-    "Requisite Dataset - L4": ("cc4125", "f4cccc")
-}
-
-dcs_resource_type_map = {
+dcs_aquifer_code_map = {
     "Translation Academy": "Bible Translation Manual",
-    "TSV Translation Notes": "",
-    "": ""
+    "Translation Words": "Translation Glossary",
+    "TSV Translation Notes": "Translation Guide",
+    "TSV Translation Questions": "Comprehension Testing",
+    "Open Bible Stories": "Foundational Bible Stories",
+    "Aligned Bible": "Bible Translation Aligned to Gk/Heb",
+    # "Hebrew Old Testament": "Bible Translation Source Text (audio preferred)",
+    # "Greek New Testament": "Bible Translation Source Text (audio preferred)",
 }
 
 
@@ -111,6 +95,9 @@ def get_resource_collections(resource_codes):
         collection_data = fetch_aquifer_api_data(f"resources/collections/{collection_code}")
         sli_category = collection_data.get("sliCategory", None)
         if sli_category:
+            if sli_category == "Foundational Bible Stores":
+                # hack because of misspelled word in aquifer
+                sli_category = "Foundational Bible Stories"
             all_sli_categories.add(sli_category)
         else:
             raise AttributeError("missing sli category!!!")
@@ -125,6 +112,7 @@ def get_resource_collections(resource_codes):
             languages_data["code"] = collection_data.get("code")
             languages_data["display_name"] = collection_data.get("displayName")
             languages_data["resource_type"] = sli_category
+            languages_data["source"] = "aquifer"
             languages_data["resource_owner"] = collection_data.get("licenseInfo", {}).get("copyright", {}).get("holder", {}).get("name")
         else:
             languages_data = pd.DataFrame([{
@@ -135,14 +123,13 @@ def get_resource_collections(resource_codes):
                 "code": collection_data.get("code"),
                 "display_name": collection_data.get("displayName"),
                 "resource_type": sli_category,
+                "source": "aquifer",
                 "resource_owner": collection_data.get("licenseInfo", {}).get("copyright", {}).get("holder", {}).get("name")
             }])
 
         collections.append(languages_data)
 
     combined_df = pd.concat(collections, ignore_index=True) if collections else pd.DataFrame()
-    print("sli categories\n______________")
-    print(", ".join(sorted(all_sli_categories)))
     return combined_df
 
 
@@ -178,7 +165,7 @@ def generate_aquifer_resource_data():
     aq_langs = get_languages()
     bibles_df = get_bibles(aq_langs)
 
-    tight_collection = collections_df[["languageId", "languageCode", "code", "resource_type", "resourceItemCount"]].copy()
+    tight_collection = collections_df[["languageId", "languageCode", "code", "resource_type", "resourceItemCount", "resource_owner", "source"]].copy()
     base_resource_count = tight_collection[tight_collection["languageId"] == 1][["code", "resourceItemCount"]].rename(
         columns={"resourceItemCount": "base_count"}
     )
@@ -200,7 +187,7 @@ def generate_aquifer_resource_data():
     total_gaps["resource_owner"] = total_gaps["licenseInformation$copyright$holder$name"]
 
     total_gaps = total_gaps[["languageId", "languageCode", "code", "englishDisplay", "type", "resource_type",
-                             "resource_owner", "resourceItemCount"]].rename(
+                             "resource_owner", "source", "resourceItemCount"]].rename(
         columns={"code": "resource_code"}
     )
     total_gaps = total_gaps.merge(base_resource_count, left_on="resource_code", right_on="code", how="left")
@@ -208,7 +195,7 @@ def generate_aquifer_resource_data():
     total_gaps["base_count"] = total_gaps["base_count"].fillna(1)
     total_gaps["completion_pct"] = round((total_gaps["resourceItemCount"] / total_gaps["base_count"]) * 100, 3)
     total_gaps["resource_status"] = total_gaps["completion_pct"].apply(get_status)
-    total_gaps = total_gaps[["englishDisplay", "languageCode", "resource_code", "resource_status", "resource_type"]]
+    total_gaps = total_gaps[["englishDisplay", "languageCode", "resource_code", "resource_status", "resource_type", "resource_owner", "source"]]
     total_gaps = pd.concat([total_gaps, bibles_df], ignore_index=True)
 
     return total_gaps
@@ -226,21 +213,6 @@ def fetch_slr_data():
         connection.close()
 
 
-def fetch_resource_data():
-    """Fetch resource data from MySQL and return as a DataFrame."""
-    connection = mysql.connector.connect(**db_config)
-
-    try:
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute(GET_STRATEGIC_RESOURCE_TYPES_QUERY)
-        results = cursor.fetchall()
-        df = pd.DataFrame(results)
-        return df
-
-    finally:
-        connection.close()  # Ensure connection is closed even if an error occurs
-
-
 def fetch_dcs_data():
     url = "https://git.door43.org/api/v1/repos/search?topic=tc-ready"
     response = requests.get(url)
@@ -249,14 +221,28 @@ def fetch_dcs_data():
     rows = []
     if "data" in data:
         for obj in data["data"]:
+            full_name = obj.get("full_name", "Unknown Name")
+            subject = obj.get("subject", "N/A")
+            abbreviation = obj.get("abbreviation", "N/A")
+            url = obj.get("clone_url", "N/A")
+            if subject in dcs_aquifer_code_map:
+                sli_category = dcs_aquifer_code_map[subject]
+            else:
+                print(f'WARNING!!! repo {full_name} with a subject of {subject} and an abbreviation of {abbreviation} '
+                      f'is not mapped and will not be included in delta report. Url is {url}')
+                continue
+            all_sli_categories.add(sli_category)
             row = [
                 obj.get("language", "N/A"),
                 obj.get("language", "N/A").split("-", 1)[0],
-                obj.get("subject", "N/A"),
-                "Satisfied"
+                f"{subject} ({full_name})",
+                sli_category,
+                "In Progress",
+                "unfoldingWord",
+                "dcs"
             ]
             rows.append(row)
-    df_columns = ["englishDisplay", "languageCode", "resource_code", "resource_status"]
+    df_columns = ["englishDisplay", "languageCode", "resource_code", "resource_type", "resource_status", "resource_owner", "source"]
     df = pd.DataFrame(rows, columns=df_columns)
     return df
 
@@ -271,66 +257,60 @@ def calculate_status_from_resources(resources_df):
     return final_status
 
 
-def save_to_excel(sl_resource_data, crd, headers, file_path=EXCEL_FILE_PATH):
-    """Expand 'data' by adding columns from 'pdf_headers' based on 'resource_status' in 'combined_resource_data'."""
-    expanded_rows = []
+def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_FILE_PATH):
+    """Export to Excel with full formatting: merged headers, color-coded subheaders, wrap text, etc."""
 
-    # Loop through each row in 'sl_resource_data' and dynamically add columns
+    # Step 1: Expand headers as (resource_type, source)
+    expanded_headers = []
+    for resource_type in headers:
+        expanded_headers.append((resource_type, "Aquifer"))
+        expanded_headers.append((resource_type, "DCS"))
+
+    # Step 2: Build rows
+    expanded_rows = []
     for _, row in sl_resource_data.iterrows():
         language_code_2 = row["language_code_2"]
         language_code_3 = row["language_code_3"]
-
         new_row = list(row.values)
 
-        for resource_type in headers:
-            # Find the corresponding resource_status where resource_type matches pdf_header
-            matching_resources = crd[
-                (crd["resource_type"] == resource_type) &
-                ((crd["languageCode"] == language_code_2) | (crd["languageCode"] == language_code_3))
-                ]
+        for resource_type, source in expanded_headers:
+            source_key = source.lower()
+            matching_resources = aquifer_dcs_data[
+                (aquifer_dcs_data["resource_type"] == resource_type) &
+                (aquifer_dcs_data["source"] == source_key) &
+                ((aquifer_dcs_data["languageCode"] == language_code_2) |
+                 (aquifer_dcs_data["languageCode"] == language_code_3))
+            ]
 
             final_status = calculate_status_from_resources(matching_resources)
-            resource_status = final_status
-
-            new_row.append(resource_status)
+            resource_lines = [f"---{res_row['resource_code']}"
+                              for _, res_row in matching_resources.iterrows()]
+            cell_text = final_status + "\n" + "\n".join(sorted(resource_lines)) if resource_lines else final_status
+            new_row.append(cell_text)
 
         expanded_rows.append(new_row)
 
-    expanded_df = pd.DataFrame(expanded_rows,
-                               columns=["Strategic Language", "language_code_2", "language_code_3",
-                                        "resource_level"] + headers)
+    # Step 3: Create DataFrame
+    core_columns = ["Strategic Language", "language_code_2", "language_code_3", "resource_level"]
+    all_columns = core_columns + expanded_headers
+    expanded_df = pd.DataFrame(expanded_rows, columns=all_columns)
     expanded_df.rename(columns={"resource_level": "Resource Level"}, inplace=True)
     expanded_df.drop(columns=["language_code_2", "language_code_3"], inplace=True)
 
-    # Save to Excel
+    # Step 4: Write to Excel
     with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        expanded_df.to_excel(writer, sheet_name="Strategic Resources", index=False)
-
-        # Apply styling
+        expanded_df.to_excel(writer, sheet_name="Strategic Resources", index=False, header=False, startrow=2)
         worksheet = writer.sheets["Strategic Resources"]
 
-        # ✅ Remove the weird empty first column (shift column alignment)
-        for col_idx, col_name in enumerate(expanded_df.columns, start=1):  # Start at 1 (Excel is 1-based)
-            # Set text alignment to left
-            for cell in worksheet[1]:
-                cell.alignment = Alignment(horizontal="left")
+        # Define styles
+        top_header_fill = PatternFill(start_color="BFBFBF", end_color="BFBFBF", fill_type="solid")   # Dark grey
+        aquifer_fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")      # Light blue
+        dcs_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")  # Very light grey
+        left_header_fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")  # Light green
+        wrap_alignment = Alignment(wrap_text=True, vertical="top")
+        bold_font = Font(bold=True)
 
-            # Apply color fill if it's in our color map
-            if col_name in header_color_map:
-                header_color, cell_color = header_color_map[col_name]
-
-                # Apply header color
-                worksheet.cell(row=1, column=col_idx).fill = PatternFill(
-                    start_color=header_color, end_color=header_color, fill_type="solid"
-                )
-
-                # Apply cell color for all rows in that column
-                for row_idx in range(2, worksheet.max_row + 1):  # Start from second row
-                    worksheet.cell(row=row_idx, column=col_idx).fill = PatternFill(
-                        start_color=cell_color, end_color=cell_color, fill_type="solid"
-                    )
-
-        # Apply borders around each cell
+        # Step 5: Define border style
         thin_border = Border(
             left=Side(border_style="thin", color="000000"),
             right=Side(border_style="thin", color="000000"),
@@ -338,14 +318,62 @@ def save_to_excel(sl_resource_data, crd, headers, file_path=EXCEL_FILE_PATH):
             bottom=Side(border_style="thin", color="000000"),
         )
 
-        for row in worksheet.iter_rows():
-            for cell in row:
-                cell.border = thin_border
+        # Step 6: Write headers
+        already_merged = set()
+        for col_idx, col in enumerate(expanded_df.columns, start=1):
+            if isinstance(col, tuple):
+                resource_type, source = col
 
-        # Auto-adjust column widths
-        for col in worksheet.columns:
-            max_length = max((len(str(cell.value)) for cell in col if cell.value), default=10)
-            worksheet.column_dimensions[col[0].column_letter].width = max_length + 2  # Add padding
+                # Subheader (row 2)
+                subheader_cell = worksheet.cell(row=2, column=col_idx, value=source)
+                subheader_cell.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center")
+                subheader_cell.font = bold_font  # Bold "Aquifer" / "DCS"
+                subheader_cell.border = thin_border
+                subheader_cell.fill = aquifer_fill if source == "Aquifer" else dcs_fill
+
+                # Top-level header (row 1)
+                if resource_type not in already_merged:
+                    header_cell = worksheet.cell(row=1, column=col_idx, value=resource_type)
+                    header_cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+                    header_cell.font = bold_font
+                    header_cell.fill = top_header_fill
+                    header_cell.border = thin_border
+                    worksheet.merge_cells(start_row=1, start_column=col_idx, end_row=1, end_column=col_idx + 1)
+                    already_merged.add(resource_type)
+
+            else:
+                # Static columns like "Strategic Language", "Resource Level"
+                header_cell = worksheet.cell(row=1, column=col_idx, value=col)
+                vertical_top = Alignment(horizontal="center", vertical="top", wrap_text=True)
+                header_cell.alignment = vertical_top if col in ["Strategic Language", "Resource Level"] else wrap_alignment
+                header_cell.font = bold_font
+                header_cell.fill = top_header_fill
+                header_cell.border = thin_border
+                worksheet.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
+
+        # Step 7: Borders, wrapping, Strategic Language coloring
+        thin_border = Border(
+            left=Side(border_style="thin", color="000000"),
+            right=Side(border_style="thin", color="000000"),
+            top=Side(border_style="thin", color="000000"),
+            bottom=Side(border_style="thin", color="000000"),
+        )
+
+        for row_idx, row in enumerate(worksheet.iter_rows(min_row=3), start=3):
+            for col_idx, cell in enumerate(row, start=1):
+                cell.border = thin_border
+                cell.alignment = wrap_alignment
+
+                # Shade Strategic Language column
+                if col_idx == 1:
+                    cell.fill = left_header_fill
+                    cell.font = bold_font
+
+        # Step 8: Auto column width
+        for col_cells in worksheet.columns:
+            col_letter = get_column_letter(col_cells[0].column)
+            max_len = max((len(str(cell.value)) for cell in col_cells if cell.value), default=10)
+            worksheet.column_dimensions[col_letter].width = max_len + 2
 
     print(f"Excel file saved at {file_path}")
 
@@ -354,10 +382,5 @@ slr_data = fetch_slr_data()
 aquifer_data = generate_aquifer_resource_data()
 dcs_data = fetch_dcs_data()
 combined_data = pd.concat([aquifer_data, dcs_data], ignore_index=True)
-
-# combine data pulled from FRED DB and aquifer
-resource_data = fetch_resource_data()
-combined_resource_data = resource_data.merge(combined_data, on="resource_code", how="inner")
-
-save_to_excel(slr_data, combined_resource_data, sorted(all_sli_categories), EXCEL_FILE_PATH)
+save_to_excel(slr_data, combined_data, sorted(all_sli_categories), EXCEL_FILE_PATH)
 print("KR1 delta report successfully generated!")
