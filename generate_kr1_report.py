@@ -12,7 +12,22 @@ AQUIFER_API_KEY = os.environ.get("AQUIFER_API_KEY")
 AQUIFER_HEADERS = {"api-key": AQUIFER_API_KEY}
 AQUIFER_BASE_URL = os.environ.get("AQUIFER_BASE_URL")
 
-all_sli_categories = set()
+all_sli_categories = {
+    "Bible Translation Aligned to Gk/Heb",
+    "Exegetical Commentary",
+    "Bible Translation Manual",
+    "Gk/Heb Semantic Lexicons",
+    "Gk/Heb Grammars",
+    "Images, Maps, Videos",
+    "Study Notes",
+    "Translation Guide",
+    "Comprehension Testing",
+    "Bible Dictionary",
+    "Bible Translation Source Text (audio preferred)",
+    "Translation Glossary",
+    "Foundational BT Training Videos",
+    "Foundational Bible Stories"
+}
 
 # Define output directory and ensure it exists
 OUTPUT_DIR = os.path.join(os.getcwd(), "output")
@@ -99,7 +114,8 @@ def get_resource_collections(resource_codes):
             if sli_category == "Foundational Bible Stores":
                 # hack because of misspelled word in aquifer
                 sli_category = "Foundational Bible Stories"
-            all_sli_categories.add(sli_category)
+            if sli_category not in all_sli_categories:
+                raise ValueError(f'aquifer sli_category: {sli_category} not in hard coded category map.')
         else:
             raise AttributeError("missing sli category!!!")
 
@@ -160,46 +176,59 @@ def get_bibles(aq_langs):
 
 
 def generate_aquifer_resource_data():
-    """Master function to generate total gaps resource data"""
     aq_resources = get_aquifer_resources()
     collections_df = get_resource_collections(aq_resources["code"])
     aq_langs = get_languages()
     bibles_df = get_bibles(aq_langs)
 
-    tight_collection = collections_df[["languageId", "languageCode", "code", "resource_type", "resourceItemCount", "resource_owner", "source"]].copy()
-    base_resource_count = tight_collection[tight_collection["languageId"] == 1][["code", "resourceItemCount"]].rename(
-        columns={"resourceItemCount": "base_count"}
+    # Fix: align languageId for merging
+    aq_langs = aq_langs.rename(columns={"id": "languageId", "code": "languageCode"})
+    collections_df = collections_df.drop(columns=["languageCode"], errors="ignore")  # drop existing one
+    enriched = collections_df.merge(aq_langs[["languageId", "languageCode", "englishDisplay"]], on="languageId",
+                                    how="left")
+
+    # Get English baseline counts (languageId == 1)
+    base_counts = (
+        enriched[enriched["languageId"] == 1][["resource_code", "resourceItemCount"]]
+        if "resource_code" in enriched.columns else
+        enriched[enriched["languageId"] == 1][["code", "resourceItemCount"]].rename(columns={"code": "resource_code"})
+    ).rename(columns={"resourceItemCount": "base_count"}).dropna()
+
+    # Prepare working set
+    enriched = enriched.rename(columns={"code": "resource_code"}).copy()
+    enriched["resourceItemCount"] = enriched["resourceItemCount"].fillna(0).astype(int)
+
+    # Merge in base count
+    enriched = enriched.merge(base_counts, on="resource_code", how="left")
+
+    # Compute completion_pct only where base_count is known
+    enriched["completion_pct"] = enriched.apply(
+        lambda row: round((row["resourceItemCount"] / row["base_count"]) * 100, 3)
+        if pd.notnull(row["base_count"]) and row["base_count"] > 0 else None,
+        axis=1
     )
 
-    lang_factor = aq_langs["id"].tolist()
-    resource_factor = aq_resources["code"].tolist()
+    # Assign status
+    def safe_get_status(row):
+        if pd.isnull(row["base_count"]):
+            return "Unknown"
+        return get_status(row["completion_pct"])
 
-    tight_collection["languageId"] = pd.Categorical(tight_collection["languageId"], categories=lang_factor)
-    tight_collection["code"] = pd.Categorical(tight_collection["code"], categories=resource_factor)
+    enriched["resource_status"] = enriched.apply(safe_get_status, axis=1)
 
-    full_index = pd.MultiIndex.from_product([lang_factor, resource_factor], names=["languageId", "code"])
-    aquifer_gaps = tight_collection.set_index(["languageId", "code"]).reindex(full_index).reset_index()
+    final_df = enriched[[
+        "englishDisplay",
+        "languageCode",
+        "resource_code",
+        "resource_status",
+        "resource_type",
+        "resource_owner",
+        "source"
+    ]]
 
-    aquifer_gaps["languageId"] = pd.to_numeric(aquifer_gaps["languageId"], errors="coerce")
-    aquifer_gaps["code"] = aquifer_gaps["code"].astype(str)
-
-    total_gaps = aquifer_gaps.merge(aq_langs, left_on="languageId", right_on="id", how="inner")
-    total_gaps = total_gaps.merge(aq_resources, left_on="code_x", right_on="code", how="inner")
-    total_gaps["resource_owner"] = total_gaps["licenseInformation$copyright$holder$name"]
-
-    total_gaps = total_gaps[["languageId", "languageCode", "code", "englishDisplay", "type", "resource_type",
-                             "resource_owner", "source", "resourceItemCount"]].rename(
-        columns={"code": "resource_code"}
-    )
-    total_gaps = total_gaps.merge(base_resource_count, left_on="resource_code", right_on="code", how="left")
-    total_gaps["resourceItemCount"] = total_gaps["resourceItemCount"].fillna(0).astype(int)
-    total_gaps["base_count"] = total_gaps["base_count"].fillna(1)
-    total_gaps["completion_pct"] = round((total_gaps["resourceItemCount"] / total_gaps["base_count"]) * 100, 3)
-    total_gaps["resource_status"] = total_gaps["completion_pct"].apply(get_status)
-    total_gaps = total_gaps[["englishDisplay", "languageCode", "resource_code", "resource_status", "resource_type", "resource_owner", "source"]]
-    total_gaps = pd.concat([total_gaps, bibles_df], ignore_index=True)
-
-    return total_gaps
+    # Append Bibles
+    total = pd.concat([final_df, bibles_df], ignore_index=True)
+    return total
 
 
 def fetch_slr_data():
@@ -243,7 +272,8 @@ def fetch_dcs_data():
                 print(f'WARNING!!! repo {full_name} with a subject of {subject} and an abbreviation of {abbreviation} '
                       f'is not mapped and will not be included in delta report. Url is {url}')
                 continue
-            all_sli_categories.add(sli_category)
+            if sli_category not in all_sli_categories:
+                raise ValueError(f'dcs sli_category: {sli_category} not in hard coded category map.')
             row = [
                 obj.get("language", "N/A"),
                 obj.get("language", "N/A").split("-", 1)[0],
@@ -260,13 +290,16 @@ def fetch_dcs_data():
 
 
 def calculate_status_from_resources(resources_df):
-    final_status = ""
-    for _, row in resources_df.iterrows():
-        status = row["resource_status"]
-        if status is not None and ((status == 'Satisfied') or (status == 'In Progress' and final_status == "")):
-            final_status = status
+    # Priority order: Satisfied > In Progress > Unknown > ""
+    priority = {"Satisfied": 3, "In Progress": 2, "Unknown": 1, "": 0, None: 0}
+    highest = ("", 0)
 
-    return final_status
+    for _, row in resources_df.iterrows():
+        status = row.get("resource_status")
+        if priority.get(status, 0) > highest[1]:
+            highest = (status, priority[status])
+
+    return highest[0]
 
 
 def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_FILE_PATH):
