@@ -1,7 +1,8 @@
 import os
+import numpy as np
 import requests
 import pandas as pd
-import mysql.connector
+import mariadb
 from openpyxl.styles import PatternFill, Alignment, Border, Side, Font
 from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
@@ -40,7 +41,7 @@ db_config = {
     'user': os.environ.get("DB_USER"),
     'password': os.environ.get("DB_PASSWORD"),
     'database': os.environ.get("DATABASE"),
-    'ssl_ca': os.environ.get("SSL_CERT_LOCATION"),
+    # 'ssl_ca': os.environ.get("SSL_CERT_LOCATION"),
 }
 
 GET_STRATEGIC_RESOURCES_QUERY = """
@@ -72,6 +73,19 @@ dcs_aquifer_code_map = {
     # "Hebrew Old Testament": "Bible Translation Source Text (audio preferred)",
     # "Greek New Testament": "Bible Translation Source Text (audio preferred)",
 }
+
+INSERT_KR1_DATA = """
+INSERT INTO kr1_progress_data (
+    language_code,
+    resource_name,
+    resource_code,
+    resource_owner,
+    source,
+    sli_category,
+    resource_status
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+"""
+
 
 
 def fetch_aquifer_api_data(endpoint):
@@ -167,10 +181,19 @@ def get_bibles(aq_langs):
     """Fetch Bible resources and merge with languages"""
     aq_bibles = pd.DataFrame(fetch_aquifer_api_data("bibles"))
     aq_bibles["resource_status"] = "Satisfied"
-
+    aq_bibles["source"] = "aquifer"
+    aq_bibles["displayName"] = aq_bibles["name"]
+    aq_bibles["resource_type"] = np.where(
+        aq_bibles.get("hasGreekAlignment", False),
+        "Bible Translation Aligned to Gk/Heb",
+        "Bible Translation Source Text (audio preferred)"
+    )
+    aq_bibles["resource_owner"] = aq_bibles["licenseInfo"].apply(
+        lambda x: x.get("copyright", {}).get("holder", {}).get("name", "") if isinstance(x, dict) else ""
+    )
     # Merge with language data
     bibles = aq_bibles.merge(aq_langs, left_on="languageId", right_on="id", how="inner")
-    return bibles[["englishDisplay", "name", "resource_status", "code"]].rename(
+    return bibles[["englishDisplay", "name", "resource_status", "code", "source", "resource_type", "displayName", "resource_owner"]].rename(
         columns={"name": "resource_code", "code": "languageCode"}
     )
 
@@ -223,6 +246,7 @@ def generate_aquifer_resource_data():
         "resource_status",
         "resource_type",
         "resource_owner",
+        "displayName",
         "source"
     ]]
 
@@ -232,7 +256,7 @@ def generate_aquifer_resource_data():
 
 
 def fetch_slr_data():
-    connection = mysql.connector.connect(**db_config)
+    connection = mariadb.connect(**db_config)
     try:
         cursor = connection.cursor(dictionary=True)
         cursor.execute(GET_STRATEGIC_RESOURCES_QUERY)
@@ -244,7 +268,7 @@ def fetch_slr_data():
 
 
 def get_language_engagement_iso_codes():
-    connection = mysql.connector.connect(**db_config)
+    connection = mariadb.connect(**db_config)
     try:
         cursor = connection.cursor(dictionary=True)
         cursor.execute(GET_LANGUAGE_ENGAGEMENT_ISO_CODES)
@@ -275,6 +299,7 @@ def fetch_dcs_data():
             if sli_category not in all_sli_categories:
                 raise ValueError(f'dcs sli_category: {sli_category} not in hard coded category map.')
             row = [
+                f"{subject} ({full_name})",
                 obj.get("language", "N/A"),
                 obj.get("language", "N/A").split("-", 1)[0],
                 f"{subject} ({full_name})",
@@ -284,7 +309,7 @@ def fetch_dcs_data():
                 "dcs"
             ]
             rows.append(row)
-    df_columns = ["englishDisplay", "languageCode", "resource_code", "resource_type", "resource_status", "resource_owner", "source"]
+    df_columns = ["displayName", "englishDisplay", "languageCode", "resource_code", "resource_type", "resource_status", "resource_owner", "source"]
     df = pd.DataFrame(rows, columns=df_columns)
     return df
 
@@ -300,6 +325,47 @@ def calculate_status_from_resources(resources_df):
             highest = (status, priority[status])
 
     return highest[0]
+
+
+def save_to_fred(sl_resource_data, aquifer_dcs_data, headers):
+    connection = mariadb.connect(**db_config)
+    try:
+        cursor = connection.cursor()
+
+        # Clear existing data
+        cursor.execute("DELETE FROM kr1_progress_data")
+
+        for resource_type in headers:
+            for _, row in sl_resource_data.iterrows():
+                language_code_2 = row["language_code_2"]
+                language_code_3 = row["language_code_3"]
+                matching_resources = aquifer_dcs_data[
+                    (aquifer_dcs_data["resource_type"] == resource_type) &
+                    ((aquifer_dcs_data["languageCode"] == language_code_2) |
+                     (aquifer_dcs_data["languageCode"] == language_code_3))
+                ]
+                language_code = language_code_3  # Use 3-letter ISO
+                for _, mr_row in matching_resources.iterrows():
+                    resource_name = mr_row.get("displayName")
+                    resource_code = mr_row.get("resource_code")
+                    resource_owner = mr_row.get("resource_owner")
+                    source = mr_row.get("source")
+                    sli_category = mr_row.get("resource_type")
+                    status = mr_row.get("resource_status")
+
+                    cursor.execute(INSERT_KR1_DATA, (
+                        language_code,
+                        resource_name,
+                        resource_code,
+                        resource_owner,
+                        source,
+                        sli_category,
+                        status
+                    ))
+
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_FILE_PATH):
@@ -343,7 +409,6 @@ def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_F
     core_columns = ["Strategic Language", "language_code_2", "language_code_3", "Resource Level"]
     all_columns = core_columns + expanded_headers
     expanded_df = pd.DataFrame(expanded_rows, columns=all_columns)
-    iso_629_2_by_row = expanded_df["language_code_3"].tolist()
     expanded_df.drop(columns=["language_code_2", "language_code_3"], inplace=True)
 
     # Step 4: Write to Excel
@@ -432,4 +497,5 @@ aquifer_data = generate_aquifer_resource_data()
 dcs_data = fetch_dcs_data()
 combined_data = pd.concat([aquifer_data, dcs_data], ignore_index=True)
 save_to_excel(slr_data, combined_data, sorted(all_sli_categories), EXCEL_FILE_PATH)
-print("KR1 delta report successfully generated!")
+save_to_fred(slr_data, combined_data, sorted(all_sli_categories))
+print("KR1 delta report successfully generated and data saved to FRED!!!")
