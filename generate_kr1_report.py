@@ -3,6 +3,7 @@ import numpy as np
 import requests
 import pandas as pd
 import mariadb
+import json
 from openpyxl.styles import PatternFill, Alignment, Border, Side, Font
 from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
@@ -40,8 +41,7 @@ db_config = {
     'host': os.environ.get("DB_HOST"),
     'user': os.environ.get("DB_USER"),
     'password': os.environ.get("DB_PASSWORD"),
-    'database': os.environ.get("DATABASE"),
-    # 'ssl_ca': os.environ.get("SSL_CERT_LOCATION"),
+    'database': os.environ.get("DATABASE")
 }
 
 GET_STRATEGIC_RESOURCES_QUERY = """
@@ -70,8 +70,8 @@ dcs_aquifer_code_map = {
     "TSV Translation Questions": "Comprehension Testing",
     "Open Bible Stories": "Foundational Bible Stories",
     "Aligned Bible": "Bible Translation Aligned to Gk/Heb",
-    # "Hebrew Old Testament": "Bible Translation Source Text (audio preferred)",
-    # "Greek New Testament": "Bible Translation Source Text (audio preferred)",
+    "Hebrew Old Testament": "Bible Translation Source Text (audio preferred)",
+    "Greek New Testament": "Bible Translation Source Text (audio preferred)",
 }
 
 INSERT_KR1_DATA = """
@@ -85,7 +85,6 @@ INSERT INTO kr1_progress_data (
     resource_status
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 """
-
 
 
 def fetch_aquifer_api_data(endpoint):
@@ -278,6 +277,11 @@ def get_language_engagement_iso_codes():
         connection.close()
 
 
+def get_dcs_resource_status(data):
+    prod_release_data = data.get("catalog", {}).get("prod", None)
+    return "Satisfied" if prod_release_data else "In Progress"
+
+
 def fetch_dcs_data():
     url = "https://git.door43.org/api/v1/repos/search?topic=tc-ready"
     response = requests.get(url)
@@ -300,11 +304,12 @@ def fetch_dcs_data():
                 raise ValueError(f'dcs sli_category: {sli_category} not in hard coded category map.')
             row = [
                 f"{subject} ({full_name})",
-                obj.get("language", "N/A"),
-                obj.get("language", "N/A").split("-", 1)[0],
+                # hack below because dcs languages are Hebrew and Greek...
+                "en" if subject == "Hebrew Old Testament" or "Greek New Testament" else obj.get("language", "N/A"),
+                "en" if subject == "Hebrew Old Testament" or "Greek New Testament" else obj.get("language", "N/A").split("-", 1)[0],
                 f"{subject} ({full_name})",
                 sli_category,
-                "In Progress",
+                get_dcs_resource_status(obj),
                 "unfoldingWord",
                 "dcs"
             ]
@@ -421,7 +426,7 @@ def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_F
         aquifer_fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
         dcs_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
         left_header_fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
-        wrap_alignment = Alignment(wrap_text=True, vertical="top")
+        wrap_alignment = Alignment(wrap_text=True, vertical="top", shrink_to_fit=False)
         bold_font = Font(bold=True)
         thin_border = Border(
             left=Side(style="thin", color="000000"),
@@ -469,8 +474,13 @@ def save_to_excel(sl_resource_data, aquifer_dcs_data, headers, file_path=EXCEL_F
         # Step 7: Auto column widths
         for col_cells in worksheet.columns:
             col_letter = get_column_letter(col_cells[0].column)
-            max_len = max((len(str(cell.value)) for cell in col_cells if cell.value), default=10)
-            worksheet.column_dimensions[col_letter].width = max_len + 2
+            col_idx = col_cells[0].column
+            if col_idx == 1:
+                worksheet.column_dimensions[col_letter].width = 35
+            elif col_idx == 2:
+                worksheet.column_dimensions[col_letter].width = 12
+            else:
+                worksheet.column_dimensions[col_letter].width = 70
 
         # Step 8: Footer rows
         from datetime import datetime
@@ -496,6 +506,7 @@ slr_data = fetch_slr_data()
 aquifer_data = generate_aquifer_resource_data()
 dcs_data = fetch_dcs_data()
 combined_data = pd.concat([aquifer_data, dcs_data], ignore_index=True)
-save_to_excel(slr_data, combined_data, sorted(all_sli_categories), EXCEL_FILE_PATH)
-save_to_fred(slr_data, combined_data, sorted(all_sli_categories))
+sorted_slr_categories = all_sli_categories
+save_to_excel(slr_data, combined_data, sorted(sorted_slr_categories), EXCEL_FILE_PATH)
+save_to_fred(slr_data, combined_data, sorted(sorted_slr_categories))
 print("KR1 delta report successfully generated and data saved to FRED!!!")
