@@ -305,8 +305,8 @@ def fetch_dcs_data():
             row = [
                 f"{subject} ({full_name})",
                 # hack below because dcs languages are Hebrew and Greek...
-                "en" if subject == "Hebrew Old Testament" or "Greek New Testament" else obj.get("language", "N/A"),
-                "en" if subject == "Hebrew Old Testament" or "Greek New Testament" else obj.get("language", "N/A").split("-", 1)[0],
+                "en" if subject == "Hebrew Old Testament" or subject == "Greek New Testament" else obj.get("language", "N/A"),
+                "en" if subject == "Hebrew Old Testament" or subject == "Greek New Testament" else obj.get("language", "N/A").split("-", 1)[0],
                 f"{subject} ({full_name})",
                 sli_category,
                 get_dcs_resource_status(obj),
