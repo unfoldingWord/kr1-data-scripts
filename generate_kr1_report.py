@@ -336,7 +336,6 @@ def save_to_fred(sl_resource_data, aquifer_dcs_data, headers):
     connection = mariadb.connect(**db_config)
     try:
         cursor = connection.cursor()
-
         # Clear existing data
         cursor.execute("DELETE FROM kr1_progress_data")
 
@@ -368,7 +367,6 @@ def save_to_fred(sl_resource_data, aquifer_dcs_data, headers):
                         source = mr_row.get("source")
                         sli_category = mr_row.get("resource_type")
                         status = mr_row.get("resource_status")
-
                         cursor.execute(INSERT_KR1_DATA, (
                             language_code,
                             resource_name,
@@ -378,7 +376,6 @@ def save_to_fred(sl_resource_data, aquifer_dcs_data, headers):
                             sli_category,
                             status
                         ))
-
         connection.commit()
     finally:
         connection.close()
