@@ -350,23 +350,34 @@ def save_to_fred(sl_resource_data, aquifer_dcs_data, headers):
                      (aquifer_dcs_data["languageCode"] == language_code_3))
                 ]
                 language_code = language_code_3  # Use 3-letter ISO
-                for _, mr_row in matching_resources.iterrows():
-                    resource_name = mr_row.get("displayName")
-                    resource_code = mr_row.get("resource_code")
-                    resource_owner = mr_row.get("resource_owner")
-                    source = mr_row.get("source")
-                    sli_category = mr_row.get("resource_type")
-                    status = mr_row.get("resource_status")
-
+                if matching_resources.empty:
                     cursor.execute(INSERT_KR1_DATA, (
                         language_code,
-                        resource_name,
-                        resource_code,
-                        resource_owner,
-                        source,
-                        sli_category,
-                        status
+                        None,
+                        None,
+                        None,
+                        None,
+                        resource_type,
+                        None
                     ))
+                else:
+                    for _, mr_row in matching_resources.iterrows():
+                        resource_name = mr_row.get("displayName")
+                        resource_code = mr_row.get("resource_code")
+                        resource_owner = mr_row.get("resource_owner")
+                        source = mr_row.get("source")
+                        sli_category = mr_row.get("resource_type")
+                        status = mr_row.get("resource_status")
+
+                        cursor.execute(INSERT_KR1_DATA, (
+                            language_code,
+                            resource_name,
+                            resource_code,
+                            resource_owner,
+                            source,
+                            sli_category,
+                            status
+                        ))
 
         connection.commit()
     finally:
