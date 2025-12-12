@@ -2,11 +2,12 @@ import os
 import numpy as np
 import requests
 import pandas as pd
-import mariadb
+#import mariadb
 import json
 from openpyxl.styles import PatternFill, Alignment, Border, Side, Font
 from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
+import pymysql
 
 load_dotenv()
 
@@ -83,7 +84,7 @@ INSERT INTO kr1_progress_data (
     source,
     sli_category,
     resource_status
-) VALUES (?, ?, ?, ?, ?, ?, ?)
+) VALUES (%s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -255,9 +256,11 @@ def generate_aquifer_resource_data():
 
 
 def fetch_slr_data():
-    connection = mariadb.connect(**db_config)
+    connection = pymysql.connect(**db_config,
+        cursorclass=pymysql.cursors.DictCursor,  # dictionary=True equivalent
+        charset="utf8mb4")
     try:
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor()
         cursor.execute(GET_STRATEGIC_RESOURCES_QUERY)
         results = cursor.fetchall()
         df = pd.DataFrame(results)
@@ -267,9 +270,11 @@ def fetch_slr_data():
 
 
 def get_language_engagement_iso_codes():
-    connection = mariadb.connect(**db_config)
+    connection = pymysql.connect(**db_config,
+        cursorclass=pymysql.cursors.DictCursor,  # dictionary=True equivalent
+        charset="utf8mb4")
     try:
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor()
         cursor.execute(GET_LANGUAGE_ENGAGEMENT_ISO_CODES)
         results = cursor.fetchall()
         return set(row["iso_629_2"] for row in results if row["iso_629_2"])
@@ -333,7 +338,7 @@ def calculate_status_from_resources(resources_df):
 
 
 def save_to_fred(sl_resource_data, aquifer_dcs_data, headers):
-    connection = mariadb.connect(**db_config)
+    connection = pymysql.connect(**db_config)
     try:
         cursor = connection.cursor()
         # Clear existing data
